@@ -1,28 +1,41 @@
 import yt_dlp
 from pydub import AudioSegment
+
 import subprocess
 import os
 import re
 import uuid
+import requests
 
 from youtube_transcript_api import YouTubeTranscriptApi
+
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
     VideoUnavailable,
 )
 
+
 DOWNLOAD_DIR = "downloades"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+os.makedirs(
+    DOWNLOAD_DIR,
+    exist_ok=True
+)
 
 
 def ensure_deno():
     """Install Deno if it isn't already present, and add it to PATH.
+
     yt-dlp needs a JS runtime (Deno) to solve YouTube's n-parameter challenge.
     """
-    deno_path = os.path.expanduser("~/.deno/bin/deno")
+
+    deno_path = os.path.expanduser(
+        "~/.deno/bin/deno"
+    )
 
     if not os.path.exists(deno_path):
+
         subprocess.run(
             "curl -fsSL https://deno.land/install.sh | sh",
             shell=True,
@@ -41,55 +54,112 @@ ensure_deno()
 
 def extract_video_id(url: str) -> str | None:
     """Pull the 11-character YouTube video ID out of common URL formats."""
+
     match = re.search(
         r"(?:v=|youtu\.be/|embed/|shorts/)([A-Za-z0-9_-]{11})",
         url,
     )
+
     return match.group(1) if match else None
+
+
+def get_supadata_api_key() -> str | None:
+    """Get Supadata API key from Streamlit Secrets or environment."""
+
+    # Streamlit Cloud
+    try:
+
+        import streamlit as st
+
+        if "SUPADATA_API_KEY" in st.secrets:
+
+            return st.secrets["SUPADATA_API_KEY"]
+
+    except Exception:
+        pass
+
+    # Local .env / environment
+    return os.getenv("SUPADATA_API_KEY")
 
 
 def get_youtube_transcript_text(url: str) -> str | None:
     """
-    Try to fetch YouTube's own captions directly.
+    Fetch YouTube transcript using Supadata.
 
-    No audio download is needed when captions are available.
+    Supadata is used here because direct YouTube transcript
+    requests can be blocked from cloud-provider IP addresses.
     """
 
-    video_id = extract_video_id(url)
+    api_key = get_supadata_api_key()
 
-    if not video_id:
-        return None
+    if not api_key:
+
+        raise RuntimeError(
+            "SUPADATA_API_KEY is not configured."
+        )
 
     try:
-        ytt_api = YouTubeTranscriptApi()
 
-        fetched_transcript = ytt_api.fetch(
-            video_id,
-            languages=["en", "hi"],
+        response = requests.get(
+            "https://api.supadata.ai/v1/transcript",
+            params={
+                "url": url,
+                "lang": "en",
+                "text": "true",
+                "mode": "auto",
+            },
+            headers={
+                "x-api-key": api_key
+            },
+            timeout=60,
         )
 
-        text = " ".join(
-            snippet.text
-            for snippet in fetched_transcript
+        response.raise_for_status()
+
+        data = response.json()
+
+        content = data.get(
+            "content",
+            ""
         )
 
-        text = text.strip()
+        # text=true normally returns a plain string
+        if isinstance(content, str):
 
-        return text if text else None
+            text = content.strip()
 
-    except (
-        TranscriptsDisabled,
-        NoTranscriptFound,
-        VideoUnavailable,
-    ):
-        return None
+        # Safety fallback if API returns segments
+        elif isinstance(content, list):
 
-    except Exception as e:
-        print(f"Transcript fetch failed: {e}")
-        return None
+            text = " ".join(
+                segment.get("text", "")
+                for segment in content
+                if isinstance(segment, dict)
+            ).strip()
+
+        else:
+
+            text = ""
+
+        if not text:
+
+            return None
+
+        return text
+
+    except requests.RequestException as e:
+
+        print(
+            f"Supadata transcript fetch failed: {e}"
+        )
+
+        raise RuntimeError(
+            f"Unable to fetch YouTube transcript: {e}"
+        ) from e
 
 
 def download_youtube_audio(url: str) -> str:
+
     unique_id = uuid.uuid4().hex[:8]
 
     output_path = os.path.join(
@@ -98,6 +168,7 @@ def download_youtube_audio(url: str) -> str:
     )
 
     ydl_opts = {
+
         "format": "bestaudio/best",
 
         "outtmpl": output_path,
@@ -111,9 +182,11 @@ def download_youtube_audio(url: str) -> str:
         ],
 
         "quiet": True,
+
         "noplaylist": True,
 
         "retries": 3,
+
         "fragment_retries": 3,
 
         "js_runtimes": {
@@ -129,14 +202,18 @@ def download_youtube_audio(url: str) -> str:
 
     # Use cookies only when a real cookie file exists.
     cookie_file = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)),
+        os.path.dirname(
+            os.path.dirname(__file__)
+        ),
         "cookies.txt"
     )
 
     if os.path.exists(cookie_file):
+
         ydl_opts["cookiefile"] = cookie_file
 
     try:
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
 
             info = ydl.extract_info(
@@ -151,13 +228,16 @@ def download_youtube_audio(url: str) -> str:
             filename = base + ".wav"
 
             if not os.path.exists(filename):
+
                 raise FileNotFoundError(
-                    f"Audio conversion failed. Expected file: {filename}"
+                    f"Audio conversion failed. "
+                    f"Expected file: {filename}"
                 )
 
             return filename
 
     except Exception as e:
+
         raise RuntimeError(
             f"Unable to download YouTube audio: {e}"
         ) from e
@@ -171,7 +251,9 @@ def convert_to_wav(input_path: str) -> str:
         + "_converted.wav"
     )
 
-    audio = AudioSegment.from_file(input_path)
+    audio = AudioSegment.from_file(
+        input_path
+    )
 
     audio = (
         audio
@@ -192,9 +274,15 @@ def chunk_audio(
     chunk_minutes: int = 10
 ) -> list:
 
-    audio = AudioSegment.from_wav(wav_path)
+    audio = AudioSegment.from_wav(
+        wav_path
+    )
 
-    chunk_ms = chunk_minutes * 60 * 1000
+    chunk_ms = (
+        chunk_minutes
+        * 60
+        * 1000
+    )
 
     chunks = []
 
@@ -232,25 +320,34 @@ def process_input(source: str) -> list:
     ):
 
         print(
-            "Detected YouTube URL. Downloading audio..."
+            "Detected YouTube URL. "
+            "Downloading audio..."
         )
 
-        wav_path = download_youtube_audio(source)
+        wav_path = download_youtube_audio(
+            source
+        )
 
     else:
 
         print(
-            "Detected local file. Converting to WAV..."
+            "Detected local file. "
+            "Converting to WAV..."
         )
 
-        wav_path = convert_to_wav(source)
+        wav_path = convert_to_wav(
+            source
+        )
 
     print("Chunking audio...")
 
-    chunks = chunk_audio(wav_path)
+    chunks = chunk_audio(
+        wav_path
+    )
 
     print(
-        f"Audio ready — {len(chunks)} chunk(s) created."
+        f"Audio ready — "
+        f"{len(chunks)} chunk(s) created."
     )
 
     return chunks
