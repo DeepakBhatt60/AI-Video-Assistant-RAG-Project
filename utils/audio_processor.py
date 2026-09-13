@@ -56,15 +56,19 @@ def get_youtube_transcript_text(url: str) -> str | None:
 
 
 def download_youtube_audio(url: str) -> str:
-    # Unique prefix per call so two runs (two browser tabs, or overlapping
-    # requests) never write/read/delete the same filename at the same time.
+
     unique_id = uuid.uuid4().hex[:8]
-    output_path = os.path.join(DOWNLOAD_DIR, f"{unique_id}_%(title)s.%(ext)s")
+    output_path = os.path.join(
+        DOWNLOAD_DIR,
+        f"{unique_id}_%(title)s.%(ext)s"
+    )
 
     ydl_opts = {
+        # Prefer a simple audio format that is widely available.
         "format": "bestaudio/best",
-        "cookiefile": "cookies.txt",
+
         "outtmpl": output_path,
+
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -72,17 +76,57 @@ def download_youtube_audio(url: str) -> str:
                 "preferredquality": "192",
             }
         ],
+
         "quiet": True,
+        "noplaylist": True,
+
+        # Retry transient YouTube failures.
+        "retries": 3,
+        "fragment_retries": 3,
+
+        # Let yt-dlp use the installed JS runtime.
+        "js_runtimes": {
+            "deno": {}
+        },
+
+        # Current YouTube extractor configuration.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["default"]
+            }
+        },
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        # FFmpegExtractAudio always converts to .wav regardless of the
-        # original download extension (.webm, .m4a, .opus, etc).
-        # Using splitext (instead of guessing specific extensions) avoids
-        # filename mismatches that led to corrupted/empty audio being processed.
-        base, _ext = os.path.splitext(ydl.prepare_filename(info))
-        filename = base + ".wav"
-    return filename
+
+    # Use cookies only when a real cookie file exists.
+    cookie_file = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "cookies.txt"
+    )
+
+    if os.path.exists(cookie_file):
+        ydl_opts["cookiefile"] = cookie_file
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+
+            base, _ext = os.path.splitext(
+                ydl.prepare_filename(info)
+            )
+
+            filename = base + ".wav"
+
+            if not os.path.exists(filename):
+                raise FileNotFoundError(
+                    f"Audio conversion failed. Expected file: {filename}"
+                )
+
+            return filename
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Unable to download YouTube audio: {e}"
+        ) from e
 
 
 def convert_to_wav(input_path: str) -> str:
